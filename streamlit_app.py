@@ -119,6 +119,7 @@ async def download_with_new_client(client, chat_id, file_url):
                     downloaded = 0
                     chunk_size = 8192  # 8KB chunks
                     last_update = datetime.now()
+                    last_message_content = ""  # Track last message content
                     
                     # Download in chunks with progress updates
                     async for chunk in resp.content.iter_chunked(chunk_size):
@@ -131,22 +132,41 @@ async def download_with_new_client(client, chat_id, file_url):
                             if file_size > 0:
                                 progress = (downloaded / file_size) * 100
                                 progress_bar = "█" * int(progress // 5) + "░" * (20 - int(progress // 5))
-                                await progress_msg.edit_text(
+                                
+                                # Create progress message
+                                progress_text = (
                                     f"📥 **جاري التحميل: {file_name}**\n"
                                     f"📊 الحجم: {size_mb:.1f} ميجابايت\n\n"
                                     f"🔄 التقدم: {progress:.1f}%\n"
                                     f"[{progress_bar}]\n"
                                     f"⏱️ تم تحميل: {downloaded/(1024*1024):.1f} ميجابايت"
                                 )
-                            last_update = now
+                                
+                                # Only update if content changed
+                                if progress_text != last_message_content:
+                                    try:
+                                        await progress_msg.edit_text(progress_text)
+                                        last_message_content = progress_text
+                                        last_update = now
+                                    except Exception as e:
+                                        # Ignore message edit errors (like MESSAGE_NOT_MODIFIED)
+                                        if "MESSAGE_NOT_MODIFIED" not in str(e):
+                                            print(f"Progress update error: {e}")
+                                        pass
                     
-                    # Prepare for upload
-                    await progress_msg.edit_text(
+                    # Prepare for upload  
+                    upload_text = (
                         f"📤 **جاري الرفع إلى تليجرام...**\n"
                         f"📊 الملف: {file_name}\n"
                         f"✅ اكتمل التحميل: {size_mb:.1f} ميجابايت\n\n"
                         f"🔄 الحالة: جاري الرفع إلى تليجرام..."
                     )
+                    
+                    try:
+                        await progress_msg.edit_text(upload_text)
+                    except Exception as e:
+                        if "MESSAGE_NOT_MODIFIED" not in str(e):
+                            print(f"Upload message error: {e}")
                     
                     # Prepare file for upload
                     video_content.seek(0)
@@ -166,15 +186,26 @@ async def download_with_new_client(client, chat_id, file_url):
                     )
                     
                     # Success message
-                    await progress_msg.edit_text(
+                    success_text = (
                         f"✅ **اكتمل الرفع!**\n"
                         f"📺 الملف: {file_name}\n"
                         f"📊 الحجم: {size_mb:.1f} ميجابايت\n"
                         f"🎉 تم رفع الفيديو بنجاح!"
                     )
                     
+                    try:
+                        await progress_msg.edit_text(success_text)
+                    except Exception as e:
+                        if "MESSAGE_NOT_MODIFIED" not in str(e):
+                            print(f"Success message error: {e}")
+                    
                 else:
-                    await progress_msg.edit_text(f"❌ فشل في تحميل الملف. رمز الحالة: {resp.status}")
+                    error_text = f"❌ فشل في تحميل الملف. رمز الحالة: {resp.status}"
+                    try:
+                        await progress_msg.edit_text(error_text)
+                    except Exception as e:
+                        if "MESSAGE_NOT_MODIFIED" not in str(e):
+                            print(f"Error message update failed: {e}")
                     
     except asyncio.TimeoutError:
         await progress_msg.edit_text("❌ **انتهت مهلة الاتصال**\n\nاستغرق التحميل وقتاً طويلاً جداً. يرجى المحاولة بملف أصغر أو فحص اتصال الإنترنت.")
