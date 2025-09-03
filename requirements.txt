@@ -1,4 +1,7 @@
 telebot
 requests
+aiohttp==3.12.15
+pyrogram==2.0.106
+tgcrypto==1.2.5
 urllib3
 pyTelegramBotAPI
