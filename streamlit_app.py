@@ -2,36 +2,41 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import json
-from pyrogram import Client, filters
-from pyrogram.types import Message
 import aiohttp
+from pyrogram.client import Client
+from pyrogram import filters
+from pyrogram.types import Message
 import os
 import asyncio
 from datetime import datetime
-import uuid
+from io import BytesIO
+import threading
 
-# Telegram bot token
-BOT_TOKEN = "8498331387:AAFcXV_yZSvfdxzYgchEBbjuJljt-yC5sAw"
-# Pyrogram API credentials
+# Replace with your Telegram bot token
+BOT_TOKEN = "6191519380:AAGk0Pg8CivZxe5uZeGWBtjnseeYHV2lnEc"
+
+# Replace with your actual API credentials from my.telegram.org
 API_ID = 20569963
 API_HASH = "37f536fd550fa5dd70cdaaca39c2b1d7"
-PYROGRAM_BOT_TOKEN = "8498331387:AAG8kflbjMHZChqvo3fkOfZmmSR1cvBJUJY"
 
-# Initialize Telebot
+# Initialize TeleBot for main Akwam functionality
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Initialize Pyrogram client
-pyro_bot = Client(
-    "streaming_bot",
+# Initialize Pyrogram client for streaming functionality
+pyrogram_client = Client(
+    "akwam_streaming_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=PYROGRAM_BOT_TOKEN
+    bot_token=BOT_TOKEN
 )
 
 API_BASE = 'https://api.x7m.site/akwam/'
 
 data_map = {}
 map_counter = 0
+
+# Track users waiting for download link
+download_waiting_users = set()
 
 def get_key(value):
     global map_counter
@@ -71,106 +76,192 @@ def get_episode_links(ep_link):
     except:
         return None
 
-# Async function to stream and upload video using Pyrogram
-async def stream_video(chat_id, file_url, file_name="video.mp4"):
-    progress_msg = await bot.send_message(chat_id, "🔄 **جاري الاتصال بالخادم...**\n\n⏳ الرجاء الانتظار أثناء جلب الفيديو.")
+# Async function to download and upload video using a fresh Pyrogram client
+async def download_with_new_client(client, chat_id, file_url):
+    """
+    Downloads and uploads a video from a direct URL with progress monitoring.
+    """
+    # Start the client first
+    await client.start()
     
+    # Send initial status message
+    progress_msg = await client.send_message(
+        chat_id=chat_id,
+        text="🔄 **جاري الاتصال بالخادم...**\n\n⏳ يرجى الانتظار أثناء جلب الفيديو."
+    )
+
     try:
+        # Use aiohttp for asynchronous streaming download
         timeout = aiohttp.ClientTimeout(total=300)  # 5 minute timeout
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Get file info first
             async with session.head(file_url, ssl=False) as head_resp:
                 if head_resp.status != 200:
-                    await bot.edit_message_text(f"❌ فشل في الوصول إلى الملف. رمز الحالة: {head_resp.status}", chat_id, progress_msg.message_id)
+                    await progress_msg.edit_text(f"❌ فشل في الوصول للملف. رمز الحالة: {head_resp.status}")
                     return
                 
                 file_size = int(head_resp.headers.get('content-length', 0))
+                file_name = os.path.basename(file_url) or "video.mp4"
+                
+                # Update progress with file info
                 size_mb = file_size / (1024 * 1024) if file_size > 0 else 0
-                await bot.edit_message_text(
+                await progress_msg.edit_text(
                     f"📥 **جاري التحميل: {file_name}**\n"
-                    f"📊 الحجم: {size_mb:.1f} ميغابايت\n\n"
-                    f"🔄 التقدم: 0% (جاري البدء...)\n"
-                    f"⏱️ الحالة: جاري التحميل...",
-                    chat_id, progress_msg.message_id
+                    f"📊 الحجم: {size_mb:.1f} ميجابايت\n\n"
+                    f"🔄 التقدم: 0% (بدء التحميل...)\n"
+                    f"⏱️ الحالة: جاري التحميل..."
                 )
 
+            # Now download with progress
             async with session.get(file_url, ssl=False) as resp:
                 if resp.status == 200:
-                    from io import BytesIO
                     video_content = BytesIO()
                     downloaded = 0
                     chunk_size = 8192  # 8KB chunks
                     last_update = datetime.now()
                     
+                    # Download in chunks with progress updates
                     async for chunk in resp.content.iter_chunked(chunk_size):
                         video_content.write(chunk)
                         downloaded += len(chunk)
                         
+                        # Update progress every 3 seconds
                         now = datetime.now()
-                        if (now - last_update).total_seconds() >= 2:
+                        if (now - last_update).total_seconds() >= 3:
                             if file_size > 0:
                                 progress = (downloaded / file_size) * 100
                                 progress_bar = "█" * int(progress // 5) + "░" * (20 - int(progress // 5))
-                                await bot.edit_message_text(
+                                await progress_msg.edit_text(
                                     f"📥 **جاري التحميل: {file_name}**\n"
-                                    f"📊 الحجم: {size_mb:.1f} ميغابايت\n\n"
+                                    f"📊 الحجم: {size_mb:.1f} ميجابايت\n\n"
                                     f"🔄 التقدم: {progress:.1f}%\n"
                                     f"[{progress_bar}]\n"
-                                    f"⏱️ تم التحميل: {downloaded/(1024*1024):.1f} ميغابايت",
-                                    chat_id, progress_msg.message_id
+                                    f"⏱️ تم تحميل: {downloaded/(1024*1024):.1f} ميجابايت"
                                 )
                             last_update = now
                     
-                    await bot.edit_message_text(
+                    # Prepare for upload
+                    await progress_msg.edit_text(
                         f"📤 **جاري الرفع إلى تليجرام...**\n"
                         f"📊 الملف: {file_name}\n"
-                        f"✅ اكتمل التحميل: {size_mb:.1f} ميغابايت\n\n"
-                        f"🔄 الحالة: جاري الرفع إلى تليجرام...",
-                        chat_id, progress_msg.message_id
+                        f"✅ اكتمل التحميل: {size_mb:.1f} ميجابايت\n\n"
+                        f"🔄 الحالة: جاري الرفع إلى تليجرام..."
                     )
                     
+                    # Prepare file for upload
                     video_content.seek(0)
                     video_content.name = file_name
                     
-                    async with pyro_bot:
-                        await pyro_bot.send_video(
-                            chat_id=chat_id,
-                            video=video_content,
-                            caption=f"🎬 **{file_name}**\n📊 الحجم: {size_mb:.1f} ميغابايت\n✅ تم الرفع بنجاح!",
-                            file_name=file_name
-                        )
+                    # Upload with progress callback
+                    def progress_callback(current, total):
+                        pass
                     
-                    await bot.edit_message_text(
+                    # Send the video
+                    await client.send_video(
+                        chat_id=chat_id,
+                        video=video_content,
+                        caption=f"🎬 **{file_name}**\n📊 الحجم: {size_mb:.1f} ميجابايت\n✅ تم الرفع بنجاح!",
+                        file_name=file_name,
+                        progress=progress_callback
+                    )
+                    
+                    # Success message
+                    await progress_msg.edit_text(
                         f"✅ **اكتمل الرفع!**\n"
                         f"📺 الملف: {file_name}\n"
-                        f"📊 الحجم: {size_mb:.1f} ميغابايت\n"
-                        f"🎉 تم بث الفيديو بنجاح!",
-                        chat_id, progress_msg.message_id
+                        f"📊 الحجم: {size_mb:.1f} ميجابايت\n"
+                        f"🎉 تم رفع الفيديو بنجاح!"
                     )
+                    
                 else:
-                    await bot.edit_message_text(f"❌ فشل في تحميل الملف. رمز الحالة: {resp.status}", chat_id, progress_msg.message_id)
+                    await progress_msg.edit_text(f"❌ فشل في تحميل الملف. رمز الحالة: {resp.status}")
                     
     except asyncio.TimeoutError:
-        await bot.edit_message_text("❌ **خطأ المهلة**\n\nاستغرق التحميل وقتًا طويلاً. حاول بملف أصغر أو تحقق من اتصالك بالإنترنت.", chat_id, progress_msg.message_id)
+        await progress_msg.edit_text("❌ **انتهت مهلة الاتصال**\n\nاستغرق التحميل وقتاً طويلاً جداً. يرجى المحاولة بملف أصغر أو فحص اتصال الإنترنت.")
     except Exception as e:
         error_msg = str(e)
         if "SSL" in error_msg:
-            await bot.edit_message_text("❌ **خطأ شهادة SSL**\n\nتعذر التحقق من شهادة الخادم. قد تكون هذه مشكلة أمان مع مضيف الفيديو.", chat_id, progress_msg.message_id)
+            await progress_msg.edit_text("❌ **خطأ في شهادة الأمان**\n\nلا يمكن التحقق من شهادة الخادم. قد تكون هناك مشكلة أمنية مع مضيف الفيديو.")
         elif "DNS" in error_msg or "resolve" in error_msg:
-            await bot.edit_message_text("❌ **خطأ الاتصال**\n\nتعذر الاتصال بالخادم. الرجاء التحقق من الرابط وحاول مرة أخرى.", chat_id, progress_msg.message_id)
+            await progress_msg.edit_text("❌ **خطأ في الاتصال**\n\nلا يمكن الاتصال بالخادم. يرجى فحص الرابط والمحاولة مرة أخرى.")
         else:
-            await bot.edit_message_text(f"❌ **حدث خطأ:**\n\n`{error_msg}`\n\nحاول مرة أخرى أو تواصل مع الدعم.", chat_id, progress_msg.message_id)
+            await progress_msg.edit_text(f"❌ **حدث خطأ:**\n\n`{error_msg}`\n\nيرجى المحاولة مرة أخرى أو التواصل مع الدعم الفني.")
 
-# Start command
+# Start command for TeleBot
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = InlineKeyboardMarkup()
     markup.add(get_dev_button())
-    bot.send_message(message.chat.id, "🎬 مرحباً! أرسل اسم فيلم أو مسلسل للبحث.", reply_markup=markup)
+    bot.send_message(message.chat.id, "🎬 مرحباً! أرسل اسم فيلم أو مسلسل للبحث.\n\n💡 يمكنك أيضاً استخدام الأمر /download لتحميل الفيديو.", reply_markup=markup)
 
-# Handle text search
-@bot.message_handler(func=lambda message: True)
-def handle_search(message):
-    query = message.text.strip()
+# Download command for TeleBot
+@bot.message_handler(commands=['download'])
+def download_command(message):
+    user_id = message.from_user.id
+    download_waiting_users.add(user_id)
+    markup = InlineKeyboardMarkup()
+    markup.add(get_dev_button())
+    bot.send_message(message.chat.id, "🔗 أرسل الرابط المباشر للفيديو الذي تريد تحميله:", reply_markup=markup)
+
+# Handle text messages (search or download link)
+@bot.message_handler(func=lambda message: not message.text.startswith('/'))
+def handle_text(message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    # Check if user is waiting for download link
+    if user_id in download_waiting_users:
+        # Remove user from waiting list
+        download_waiting_users.discard(user_id)
+        
+        # Validate URL
+        if not text.startswith(("http://", "https://")):
+            markup = InlineKeyboardMarkup()
+            markup.add(get_dev_button())
+            bot.send_message(message.chat.id, "❌ الرابط المدرج غير صحيح. يرجى إدراج رابط كامل يبدأ بـ http أو https", reply_markup=markup)
+            return
+        
+        # Start download process
+        bot.send_message(message.chat.id, "🔄 جاري بدء عملية التحميل...")
+        
+        # Use a simple approach - run pyrogram download in new loop
+        def start_download():
+            try:
+                # Create a new event loop for this download
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Create a new Pyrogram client with unique session name
+                import time
+                import random
+                unique_id = f"download_{message.chat.id}_{int(time.time())}_{random.randint(1000,9999)}"
+                download_client = Client(
+                    unique_id,
+                    api_id=API_ID,
+                    api_hash=API_HASH,
+                    bot_token=BOT_TOKEN
+                )
+                
+                # Run the download
+                loop.run_until_complete(download_with_new_client(download_client, message.chat.id, text))
+                
+                # Clean up
+                try:
+                    loop.run_until_complete(download_client.stop())
+                except:
+                    pass
+                loop.close()
+                
+            except Exception as e:
+                print(f"Error in download: {e}")
+                bot.send_message(message.chat.id, f"❌ خطأ في التحميل: {str(e)}")
+        
+        download_thread = threading.Thread(target=start_download)
+        download_thread.start()
+        return
+    
+    # Regular search functionality
+    query = text
     query_key = get_key(query)
     results = search_api(query)
     if not results or not results.get('results'):
@@ -188,7 +279,8 @@ def handle_search(message):
         callback_data = f"select:{link_key}:1:{query_key}"
         markup.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
 
-    if len(results['results']) == 10:
+    # Pagination if more pages
+    if len(results['results']) == 10:  # Assuming 10 per page
         markup.add(InlineKeyboardButton("➡️ الصفحة التالية", callback_data=f"next:2:{query_key}"))
 
     markup.add(get_dev_button())
@@ -214,15 +306,18 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "خطأ في جلب التفاصيل.")
             return
 
+        # Send photo with story as caption if possible
         caption = f"🎬 {details.get('title', '')}\n\n{details.get('story', '')}"
         photo_sent = False
         if 'image' in details:
             try:
-                bot.send_photo(call.message.chat.id, details['image'], caption=caption[:1024])
+                bot.send_photo(call.message.chat.id, details['image'], caption=caption[:1024])  # Truncate if too long
                 photo_sent = True
             except:
+                # If photo fails, continue without it
                 pass
 
+        # Prepare info buttons
         info_items = []
         if 'badge' in details:
             info_items.append(f"🏷️ {details['badge']}")
@@ -244,13 +339,14 @@ def callback_handler(call):
 
         markup = InlineKeyboardMarkup(row_width=2)
 
+        # Add info buttons
         for i in range(0, len(info_items), 2):
             row = []
             for j in range(i, min(i+2, len(info_items))):
                 row.append(InlineKeyboardButton(info_items[j], callback_data="noop"))
             markup.row(*row)
 
-        if 'episodes' in details:
+        if 'episodes' in details:  # It's a series season
             for ep in details['episodes']:
                 ep_title = ep['title']
                 ep_link = ep['link']
@@ -259,26 +355,28 @@ def callback_handler(call):
                 markup.add(InlineKeyboardButton(ep_title, callback_data=callback_data))
             
             if photo_sent:
+                # If photo was sent, send episodes list with proper text
                 bot.send_message(call.message.chat.id, "📋 الحلقات المتاحة:", reply_markup=markup)
             else:
+                # If no photo, send title with episodes
                 bot.send_message(call.message.chat.id, f"📋 {details.get('title', 'الحلقات')}:", reply_markup=markup)
-        else:
+        else:  # It's a movie
             if 'links' in details:
                 for quality, links_list in details['links'].items():
                     for link_item in links_list:
                         size = link_item.get('size', '')
+                        # Add direct video if available
                         if 'video_direct' in link_item:
                             direct_url = link_item['video_direct']
-                            file_name = f"{details.get('title', 'video')}_{quality}.mp4"
-                            direct_key = get_key({'url': direct_url, 'file_name': file_name})
                             markup.add(InlineKeyboardButton(f"⬇️ تحميل مباشر {quality} ({size})", url=direct_url))
-                            markup.add(InlineKeyboardButton(f"📤 إرسال إلى الدردشة {quality} ({size})", callback_data=f"stream:{direct_key}"))
+                        # Add embed if available
                         if 'embed_link' in link_item:
                             embed_url = link_item['embed_link']
                             markup.add(InlineKeyboardButton(f"▶️ مشاهدة اونلاين {quality} ({size})", url=embed_url))
             
             bot.send_message(call.message.chat.id, "🎬 روابط الفيلم:", reply_markup=markup)
 
+        # Add back to search results if needed
         back_markup = InlineKeyboardMarkup()
         back_markup.add(InlineKeyboardButton("🔙 العودة إلى البحث", callback_data=f"search:{page}:{query_key}"))
         back_markup.add(get_dev_button())
@@ -295,6 +393,7 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "خطأ في جلب الحلقة.")
             return
 
+        # Send photo for episode
         caption = ep_details.get('title', '')
         photo_sent = False
         if 'image' in ep_details:
@@ -302,8 +401,10 @@ def callback_handler(call):
                 bot.send_photo(call.message.chat.id, ep_details['image'], caption=caption)
                 photo_sent = True
             except:
+                # If photo fails, continue without it
                 pass
 
+        # Prepare info buttons for episode
         info_items = []
         if 'rating' in ep_details:
             info_items.append(f"⭐ التقييم: {ep_details['rating']}")
@@ -322,6 +423,7 @@ def callback_handler(call):
 
         markup = InlineKeyboardMarkup(row_width=2)
 
+        # Add info buttons
         for i in range(0, len(info_items), 2):
             row = []
             for j in range(i, min(i+2, len(info_items))):
@@ -332,15 +434,13 @@ def callback_handler(call):
             for quality, links_list in ep_details['links'].items():
                 for link_item in links_list:
                     size = link_item.get('size', '')
+                    # For episodes, check videos
                     if 'videos' in link_item:
                         for vid in link_item['videos']:
                             v_size = vid['size']
                             v_url = vid['url']
                             v_embed = vid['embed']
-                            file_name = f"{ep_details.get('title', 'episode')}_{v_size}.mp4"
-                            direct_key = get_key({'url': v_url, 'file_name': file_name})
                             markup.add(InlineKeyboardButton(f"⬇️ تحميل مباشر {v_size}p ({size})", url=v_url))
-                            markup.add(InlineKeyboardButton(f"📤 إرسال إلى الدردشة {v_size}p ({size})", callback_data=f"stream:{direct_key}"))
                             markup.add(InlineKeyboardButton(f"▶️ مشاهدة اونلاين {v_size}p ({size})", url=v_embed))
 
         markup.add(get_dev_button())
@@ -369,6 +469,7 @@ def callback_handler(call):
             callback_data = f"select:{link_key}:{page}:{query_key}"
             markup.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
 
+        # Pagination buttons
         row = []
         if page > 1:
             row.append(InlineKeyboardButton("⬅️ الصفحة السابقة", callback_data=f"prev:{page-1}:{query_key}"))
@@ -401,6 +502,7 @@ def callback_handler(call):
             callback_data = f"select:{link_key}:{page}:{query_key}"
             markup.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
 
+        # Pagination buttons
         row = []
         if page > 1:
             row.append(InlineKeyboardButton("⬅️ الصفحة السابقة", callback_data=f"prev:{page-1}:{query_key}"))
@@ -412,29 +514,35 @@ def callback_handler(call):
         markup.add(get_dev_button())
         bot.edit_message_text(f"🔍 نتائج البحث عن '{query}':", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-    elif action == 'stream':
-        direct_key = data[1]
-        direct_data = data_map.get(direct_key)
-        if not direct_data:
-            bot.answer_callback_query(call.id, "خطأ: رابط الفيديو غير موجود.")
-            return
-        file_url = direct_data['url']
-        file_name = direct_data['file_name']
-        bot.answer_callback_query(call.id, "جاري بدء عملية البث...")
-        asyncio.run_coroutine_threadsafe(stream_video(call.message.chat.id, file_url, file_name), loop)
-
     elif action == 'noop':
-        pass
+        pass  # Do nothing
 
     bot.answer_callback_query(call.id)
 
-# Run both bots
+# Function to run both bots
+async def start_pyrogram():
+    await pyrogram_client.start()
+
+def run_both_bots():
+    print("🤖 بدء تشغيل البوت...")
+    
+    # Start Pyrogram client in a separate thread
+    def start_pyrogram_client():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(start_pyrogram())
+        loop.run_forever()
+    
+    pyrogram_thread = threading.Thread(target=start_pyrogram_client)
+    pyrogram_thread.daemon = True
+    pyrogram_thread.start()
+    
+    print("✅ تم تشغيل عميل Pyrogram")
+    print("✅ بدء تشغيل TeleBot...")
+    
+    # Start telebot polling
+    bot.infinity_polling()
+
+# Run the bot
 if __name__ == "__main__":
-    print("🤖 Bot started...")
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(pyro_bot.start())
-        bot.infinity_polling()
-    finally:
-        loop.run_until_complete(pyro_bot.stop())
-        loop.close()
+    run_both_bots()
