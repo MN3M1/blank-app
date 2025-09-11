@@ -1,7 +1,7 @@
+yt-dlp>=2023.12.30
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+aiohttp>=3.9.0
+requests>=2.31.0
+wget>=3.2
 telebot
-requests
-aiohttp==3.12.15
-pyrogram==2.0.106
-tgcrypto==1.2.5
-urllib3
-pyTelegramBotAPI
