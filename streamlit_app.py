@@ -1,579 +1,354 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import requests
-import json
-import aiohttp
-from pyrogram.client import Client
-from pyrogram import filters
-from pyrogram.types import Message
-import os
-import asyncio
-from datetime import datetime
-from io import BytesIO
-import threading
+import os, re, yt_dlp, asyncio, wget, time
 
-# Replace with your Telegram bot token
-BOT_TOKEN = "6191519380:AAGk0Pg8CivZxe5uZeGWBtjnseeYHV2lnEc"
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 
-# Replace with your actual API credentials from my.telegram.org
-API_ID = 20569963
-API_HASH = "37f536fd550fa5dd70cdaaca39c2b1d7"
-
-# Initialize TeleBot for main Akwam functionality
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# Initialize Pyrogram client for streaming functionality
-pyrogram_client = Client(
-    "akwam_streaming_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+bot = Client(
+    "youtube",
+    api_id = 20569963,
+    api_hash = "37f536fd550fa5dd70cdaaca39c2b1d7",
+    bot_token = "6191519380:AAGk0Pg8CivZxe5uZeGWBtjnseeYHV2lnEc"
 )
 
-API_BASE = 'https://api.x7m.site/akwam/'
+def search_yt(query):
+    ydl_opts = {
+        'format': 'best',
+        'quiet': True,
+        'extract_flat': True,
+        'cookiefile': 'cookies.txt',
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(f"ytsearch10:{query}", download=False)
+            if 'entries' in info:
+                return info['entries']
+        except Exception as e:
+            print(f"An error occurred during search: {e}")
+            return None
 
-data_map = {}
-map_counter = 0
+@bot.on_message((filters.private | filters.group) & filters.text)
+async def main(bot, msg):
+    if not msg.text:
+        return
+    if msg.text == "/youtube":
+        await bot.send_message(msg.chat.id, f"• مرحبا بك 《 {msg.from_user.mention} 》\n\n• في بوت اليوتيوب ارسل بوت + ماذا تريد \n• يدعم التحميل حتي 2GB")
 
-# Track users waiting for download link
-download_waiting_users = set()
+    if "بوت" in msg.text and not msg.text.startswith("/dl_"):
+        search_query = msg.text.replace("بوت", "").strip()
+        if not search_query:
+            return await bot.send_message(msg.chat.id, "Please provide a search query after 'بوت'.")
 
-def get_key(value):
-    global map_counter
-    key = str(map_counter)
-    data_map[key] = value
-    map_counter += 1
-    return key
+        wait = await bot.send_message(msg.chat.id, f'🔎︙البحث عن "{search_query}"...')
+        search_results = search_yt(search_query)
 
-# Function to create a constant dev button
-def get_dev_button():
-    return InlineKeyboardButton("👨‍💻 المطور @M_N_3_M", url="https://t.me/M_N_3_M")
+        if not search_results:
+            return await wait.edit(f'❌︙لم يتم العثور على نتائج لـ "{search_query}".')
 
-# Function to search API
-def search_api(query, page=1):
-    url = f"{API_BASE}?q={query}&page={page}"
-    try:
-        response = requests.get(url)
-        return response.json() if response.status_code == 200 else None
-    except:
-        return None
+        txt = ''
+        for i, video in enumerate(search_results[:9]):
+            title = video.get("title")
+            duration = video.get("duration_string") or "N/A"
+            views = video.get("view_count")
+            id = video.get("id", "").replace("-", "mnem")
+            channel_name = video.get("channel") or video.get("uploader") or "Unknown Channel"
 
-# Function to get item details
-def get_item_details(link):
-    url = f"{API_BASE}?link={link}"
-    try:
-        response = requests.get(url)
-        return response.json() if response.status_code == 200 else None
-    except:
-        return None
+            if not title or not id:
+                continue
 
-# Function to get episode watch links
-def get_episode_links(ep_link):
-    url = f"{API_BASE}?ep={ep_link}"
-    try:
-        response = requests.get(url)
-        return response.json() if response.status_code == 200 else None
-    except:
-        return None
+            txt += f"🎬 [{title}](https://youtu.be/{id})\n👤 {channel_name}\n🕑 {duration} - 👁 {views}\n🔗 /dl_{id}\n\n"
 
-# Async function to download and upload video using a fresh Pyrogram client
-async def download_with_new_client(client, chat_id, file_url):
-    """
-    Downloads and uploads a video from a direct URL with progress monitoring.
-    """
-    # Start the client first
-    await client.start()
+        await wait.edit(f'🔎︙نتائج البحث لـ "{search_query}"\n\n{txt}', disable_web_page_preview=True)
+        return  # Exit early to avoid processing other conditions
+
+    # Check for YouTube links (including shorts)
+    youtube_pattern = r'(?:https?://)?(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be)/(?:watch\?v=|embed/|v/|shorts/)?([a-zA-Z0-9_-]{11})'
+    youtube_match = re.search(youtube_pattern, msg.text)
     
-    # Send initial status message
-    progress_msg = await client.send_message(
-        chat_id=chat_id,
-        text="🔄 **جاري الاتصال بالخادم...**\n\n⏳ يرجى الانتظار أثناء جلب الفيديو."
-    )
+    if youtube_match:
+        vid_id = youtube_match.group(1)
+        wait = await bot.send_message(msg.chat.id, f'🔎︙البحث عن "https://youtu.be/{vid_id}"...', disable_web_page_preview=True)
 
-    try:
-        # Use aiohttp for asynchronous streaming download
-        timeout = aiohttp.ClientTimeout(total=300)  # 5 minute timeout
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Get file info first
-            async with session.head(file_url, ssl=False) as head_resp:
-                if head_resp.status != 200:
-                    await progress_msg.edit_text(f"❌ فشل في الوصول للملف. رمز الحالة: {head_resp.status}")
-                    return
+        try:
+            print(f"Processing YouTube link for video ID: {vid_id}")
+            # Use yt-dlp for metadata extraction with cookies
+            with yt_dlp.YoutubeDL({
+                'quiet': True,
+                'cookiefile': 'cookies.txt',
+                'extract_flat': False
+            }) as ydl:
+                info = ydl.extract_info(f"https://youtu.be/{vid_id}", download=False)
                 
-                file_size = int(head_resp.headers.get('content-length', 0))
-                file_name = os.path.basename(file_url) or "video.mp4"
-                
-                # Update progress with file info
-                size_mb = file_size / (1024 * 1024) if file_size > 0 else 0
-                await progress_msg.edit_text(
-                    f"📥 **جاري التحميل: {file_name}**\n"
-                    f"📊 الحجم: {size_mb:.1f} ميجابايت\n\n"
-                    f"🔄 التقدم: 0% (بدء التحميل...)\n"
-                    f"⏱️ الحالة: جاري التحميل..."
+            title = info.get('title', 'Unknown Title') if info else 'Unknown Title'
+            author = info.get('uploader', 'Unknown Channel') if info else 'Unknown Channel'
+            views = info.get('view_count', 'N/A') if info else 'N/A'
+            thumbnail = info.get('thumbnail') if info else None
+            
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("مقطع فيديو 🎞", callback_data=f"video&&{vid_id}"), InlineKeyboardButton("ملف صوتي 📼", callback_data=f"audio&&{vid_id}")]])
+
+            if thumbnail:
+                await bot.send_photo(
+                    msg.chat.id,
+                    photo=thumbnail,
+                    caption=f"🎬 [{title}](https://youtu.be/{vid_id})\n👤 {author}\n👁 {views}",
+                    reply_markup=keyboard
                 )
+            else:
+                await bot.send_message(
+                    msg.chat.id,
+                    text=f"🎬 [{title}](https://youtu.be/{vid_id})\n👤 {author}\n👁 {views}",
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True
+                )
+            print(f"Successfully processed YouTube link: {title}")
+        except Exception as e:
+            print(f"Error processing YouTube link {vid_id}: {e}")
+            await wait.edit(f"❌ خطأ في الوصول للفيديو: {e}")
+        finally:
+            await wait.delete()
+        return  # Exit early to avoid processing other conditions
 
-            # Now download with progress
-            async with session.get(file_url, ssl=False) as resp:
-                if resp.status == 200:
-                    video_content = BytesIO()
-                    downloaded = 0
-                    chunk_size = 8192  # 8KB chunks
-                    last_update = datetime.now()
-                    last_message_content = ""  # Track last message content
-                    
-                    # Download in chunks with progress updates
-                    async for chunk in resp.content.iter_chunked(chunk_size):
-                        video_content.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        # Update progress every 3 seconds
-                        now = datetime.now()
-                        if (now - last_update).total_seconds() >= 3:
-                            if file_size > 0:
-                                progress = (downloaded / file_size) * 100
-                                progress_bar = "█" * int(progress // 5) + "░" * (20 - int(progress // 5))
-                                
-                                # Create progress message
-                                progress_text = (
-                                    f"📥 **جاري التحميل: {file_name}**\n"
-                                    f"📊 الحجم: {size_mb:.1f} ميجابايت\n\n"
-                                    f"🔄 التقدم: {progress:.1f}%\n"
-                                    f"[{progress_bar}]\n"
-                                    f"⏱️ تم تحميل: {downloaded/(1024*1024):.1f} ميجابايت"
-                                )
-                                
-                                # Only update if content changed
-                                if progress_text != last_message_content:
-                                    try:
-                                        await progress_msg.edit_text(progress_text)
-                                        last_message_content = progress_text
-                                        last_update = now
-                                    except Exception as e:
-                                        # Ignore message edit errors (like MESSAGE_NOT_MODIFIED)
-                                        if "MESSAGE_NOT_MODIFIED" not in str(e):
-                                            print(f"Progress update error: {e}")
-                                        pass
-                    
-                    # Prepare for upload  
-                    upload_text = (
+    if msg.text.startswith("/dl_"):
+        vid_id = msg.text.replace("mnem", "-").replace("/dl_", "")
+        wait = await bot.send_message(msg.chat.id, f'🔎︙البحث عن "https://youtu.be/{vid_id}"...', disable_web_page_preview=True)
+
+        try:
+            print(f"Processing download request for video ID: {vid_id}")
+            # Use yt-dlp for metadata extraction with cookies
+            with yt_dlp.YoutubeDL({
+                'quiet': True,
+                'cookiefile': 'cookies.txt',
+                'extract_flat': False
+            }) as ydl:
+                info = ydl.extract_info(f"https://youtu.be/{vid_id}", download=False)
+                
+            title = info.get('title', 'Unknown Title')
+            author = info.get('uploader', 'Unknown Channel')
+            views = info.get('view_count', 'N/A')
+            thumbnail = info.get('thumbnail')
+            
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("مقطع فيديو 🎞", callback_data=f"video&&{vid_id}"), InlineKeyboardButton("ملف صوتي 📼", callback_data=f"audio&&{vid_id}")]])
+
+            if thumbnail:
+                await bot.send_photo(
+                    msg.chat.id,
+                    photo=thumbnail,
+                    caption=f"🎬 [{title}](https://youtu.be/{vid_id})\n👤 {author}\n👁 {views}",
+                    reply_markup=keyboard
+                )
+            else:
+                await bot.send_message(
+                    msg.chat.id,
+                    text=f"🎬 [{title}](https://youtu.be/{vid_id})\n👤 {author}\n👁 {views}",
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True
+                )
+            print(f"Successfully processed video: {title}")
+        except Exception as e:
+            print(f"Error processing video {vid_id}: {e}")
+            await wait.edit(f"❌ خطأ في الوصول للفيديو: {e}")
+        finally:
+            await wait.delete()
+
+@bot.on_callback_query(filters.regex("&&"), group=24)
+async def download(bot, query: CallbackQuery):
+    await bot.delete_messages(query.message.chat.id, query.message.id)
+    data_parts = query.data.split("&&")
+    if len(data_parts) < 2:
+        return
+    video_id = data_parts[1]
+    video_link = f"https://youtu.be/{video_id}"
+    progress_msg = await bot.send_message(query.message.chat.id, "🚀 بدء التحميل....")
+    
+    def progress_hook(d):
+        if d['status'] == 'downloading':
+            downloaded = d.get('downloaded_bytes', 0)
+            total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+            if total > 0:
+                progress = (downloaded / total) * 100
+                # Simple progress logging to avoid async issues
+                if progress % 10 == 0 or progress > 95:
+                    print(f"Download progress: {progress:.1f}% - {downloaded/(1024*1024):.1f}/{total/(1024*1024):.1f} MB")
+
+    # Initialize file paths for cleanup
+    video_file = None
+    audio_file = None
+    thumb = None
+    
+    try:
+        print(f"Starting download for: {video_link}")
+        # Get video info using yt-dlp for metadata
+        with yt_dlp.YoutubeDL({
+            'quiet': True,
+            'cookiefile': 'cookies.txt',
+            'extract_flat': False
+        }) as ydl:
+            video_info = ydl.extract_info(video_link, download=False)
+            
+        title = video_info.get('title', 'Unknown Title')
+        author = video_info.get('uploader', 'Unknown Channel')
+        duration = video_info.get('duration', 0)
+        thumbnail_url = video_info.get('thumbnail')
+        
+        # Download thumbnail
+        if thumbnail_url:
+            thumb = wget.download(thumbnail_url)
+        print(f"Downloaded thumbnail for: {title}")
+
+        if data_parts[0] == "video":
+            with yt_dlp.YoutubeDL({
+                "format": "best",
+                "keepvideo": True,
+                "prefer_ffmpeg": False,
+                "geo_bypass": True,
+                "outtmpl": "%(title)s.%(ext)s",
+                "quiet": True,
+                "cookiefile": "cookies.txt",
+                "progress_hooks": [progress_hook]
+            }) as ytdl:
+                info = ytdl.extract_info(video_link, download=False)
+                video_file = ytdl.prepare_filename(info)
+                ytdl.process_info(info)
+                
+            file_size = os.path.getsize(video_file) if os.path.exists(video_file) else 0
+            size_mb = file_size / (1024 * 1024)
+            
+            if progress_msg:
+                try:
+                    await progress_msg.edit_text(
                         f"📤 **جاري الرفع إلى تليجرام...**\n"
-                        f"📊 الملف: {file_name}\n"
+                        f"📊 الملف: {os.path.basename(video_file)}\n"
                         f"✅ اكتمل التحميل: {size_mb:.1f} ميجابايت\n\n"
                         f"🔄 الحالة: جاري الرفع إلى تليجرام..."
                     )
-                    
-                    try:
-                        await progress_msg.edit_text(upload_text)
-                    except Exception as e:
-                        if "MESSAGE_NOT_MODIFIED" not in str(e):
-                            print(f"Upload message error: {e}")
-                    
-                    # Prepare file for upload
-                    video_content.seek(0)
-                    video_content.name = file_name
-                    
-                    # Upload with progress callback
-                    def progress_callback(current, total):
-                        pass
-                    
-                    # Send the video
-                    await client.send_video(
-                        chat_id=chat_id,
-                        video=video_content,
-                        caption=f"🎬 **{file_name}**\n📊 الحجم: {size_mb:.1f} ميجابايت\n✅ تم الرفع بنجاح!",
-                        file_name=file_name,
-                        progress=progress_callback
-                    )
-                    
-                    # Success message
-                    success_text = (
-                        f"✅ **اكتمل الرفع!**\n"
-                        f"📺 الملف: {file_name}\n"
-                        f"📊 الحجم: {size_mb:.1f} ميجابايت\n"
-                        f"🎉 تم رفع الفيديو بنجاح!"
-                    )
-                    
-                    try:
-                        await progress_msg.edit_text(success_text)
-                    except Exception as e:
-                        if "MESSAGE_NOT_MODIFIED" not in str(e):
-                            print(f"Success message error: {e}")
-                    
-                else:
-                    error_text = f"❌ فشل في تحميل الملف. رمز الحالة: {resp.status}"
-                    try:
-                        await progress_msg.edit_text(error_text)
-                    except Exception as e:
-                        if "MESSAGE_NOT_MODIFIED" not in str(e):
-                            print(f"Error message update failed: {e}")
-                    
-    except asyncio.TimeoutError:
-        await progress_msg.edit_text("❌ **انتهت مهلة الاتصال**\n\nاستغرق التحميل وقتاً طويلاً جداً. يرجى المحاولة بملف أصغر أو فحص اتصال الإنترنت.")
-    except Exception as e:
-        error_msg = str(e)
-        if "SSL" in error_msg:
-            await progress_msg.edit_text("❌ **خطأ في شهادة الأمان**\n\nلا يمكن التحقق من شهادة الخادم. قد تكون هناك مشكلة أمنية مع مضيف الفيديو.")
-        elif "DNS" in error_msg or "resolve" in error_msg:
-            await progress_msg.edit_text("❌ **خطأ في الاتصال**\n\nلا يمكن الاتصال بالخادم. يرجى فحص الرابط والمحاولة مرة أخرى.")
-        else:
-            await progress_msg.edit_text(f"❌ **حدث خطأ:**\n\n`{error_msg}`\n\nيرجى المحاولة مرة أخرى أو التواصل مع الدعم الفني.")
-
-# Start command for TeleBot
-@bot.message_handler(commands=['start'])
-def start(message):
-    markup = InlineKeyboardMarkup()
-    markup.add(get_dev_button())
-    bot.send_message(message.chat.id, "🎬 مرحباً! أرسل اسم فيلم أو مسلسل للبحث.\n\n💡 يمكنك أيضاً استخدام الأمر /download لتحميل الفيديو.", reply_markup=markup)
-
-# Download command for TeleBot
-@bot.message_handler(commands=['download'])
-def download_command(message):
-    user_id = message.from_user.id
-    download_waiting_users.add(user_id)
-    markup = InlineKeyboardMarkup()
-    markup.add(get_dev_button())
-    bot.send_message(message.chat.id, "🔗 أرسل الرابط المباشر للفيديو الذي تريد تحميله:", reply_markup=markup)
-
-# Handle text messages (search or download link)
-@bot.message_handler(func=lambda message: not message.text.startswith('/'))
-def handle_text(message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-    
-    # Check if user is waiting for download link
-    if user_id in download_waiting_users:
-        # Remove user from waiting list
-        download_waiting_users.discard(user_id)
-        
-        # Validate URL
-        if not text.startswith(("http://", "https://")):
-            markup = InlineKeyboardMarkup()
-            markup.add(get_dev_button())
-            bot.send_message(message.chat.id, "❌ الرابط المدرج غير صحيح. يرجى إدراج رابط كامل يبدأ بـ http أو https", reply_markup=markup)
-            return
-        
-        # Start download process
-        bot.send_message(message.chat.id, "🔄 جاري بدء عملية التحميل...")
-        
-        # Use a simple approach - run pyrogram download in new loop
-        def start_download():
-            try:
-                # Create a new event loop for this download
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                # Create a new Pyrogram client with unique session name
-                import time
-                import random
-                unique_id = f"download_{message.chat.id}_{int(time.time())}_{random.randint(1000,9999)}"
-                download_client = Client(
-                    unique_id,
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                    bot_token=BOT_TOKEN
-                )
-                
-                # Run the download
-                loop.run_until_complete(download_with_new_client(download_client, message.chat.id, text))
-                
-                # Clean up
-                try:
-                    loop.run_until_complete(download_client.stop())
                 except:
                     pass
-                loop.close()
+            
+            def upload_progress(current, total):
+                try:
+                    progress = (current / total) * 100
+                    # Simple progress logging to avoid async issues
+                    if progress % 10 == 0 or progress > 95:
+                        print(f"Upload progress: {progress:.1f}% - {current/(1024*1024):.1f}/{total/(1024*1024):.1f} MB")
+                except Exception as e:
+                    print(f"Upload progress error: {e}")
                 
+            await bot.send_video(
+                query.message.chat.id,
+                video=video_file,
+                duration=duration,
+                thumb=thumb,
+                caption=f"By : @M_N_3_M",
+                progress=upload_progress
+            )
+                
+            if progress_msg:
+                try:
+                    await progress_msg.edit_text(
+                        f"✅ **اكتمل الرفع!**\n"
+                        f"📺 الملف: {os.path.basename(video_file)}\n"
+                        f"📊 الحجم: {size_mb:.1f} ميجابايت\n"
+                        f"🎉 By @M_N_3_M!"
+                    )
+                except:
+                    pass
+
+        if data_parts[0] == "audio":
+            with yt_dlp.YoutubeDL({
+                "format": "bestaudio[ext=m4a]",
+                "outtmpl": "%(title)s.%(ext)s",
+                "quiet": True,
+                "cookiefile": "cookies.txt",
+                "progress_hooks": [progress_hook]
+            }) as ytdl:
+                info = ytdl.extract_info(video_link, download=False)
+                audio_file = ytdl.prepare_filename(info)
+                ytdl.process_info(info)
+                
+            file_size = os.path.getsize(audio_file) if os.path.exists(audio_file) else 0
+            size_mb = file_size / (1024 * 1024)
+            
+            if progress_msg:
+                try:
+                    await progress_msg.edit_text(
+                        f"📤 **جاري الرفع إلى تليجرام...**\n"
+                        f"📊 الملف: {os.path.basename(audio_file)}\n"
+                        f"✅ اكتمل التحميل: {size_mb:.1f} ميجابايت\n\n"
+                        f"🔄 الحالة: جاري الرفع إلى تليجرام..."
+                    )
+                except:
+                    pass
+            
+            def upload_progress_audio(current, total):
+                try:
+                    progress = (current / total) * 100
+                    # Simple progress logging to avoid async issues
+                    if progress % 10 == 0 or progress > 95:
+                        print(f"Audio upload progress: {progress:.1f}% - {current/(1024*1024):.1f}/{total/(1024*1024):.1f} MB")
+                except Exception as e:
+                    print(f"Audio upload progress error: {e}")
+                
+            await bot.send_audio(
+                query.message.chat.id,
+                audio=audio_file,
+                caption=f"By : @M_N_3_M",
+                title=title,
+                duration=duration,
+                thumb=thumb,
+                performer=author,
+                progress=upload_progress_audio
+            )
+                
+            if progress_msg:
+                try:
+                    await progress_msg.edit_text(
+                        f"✅ **اكتمل الرفع!**\n"
+                        f"📺 الملف: {os.path.basename(audio_file)}\n"
+                        f"📊 الحجم: {size_mb:.1f} ميجابايت\n"
+                        f"🎉 By @M_N_3_M!"
+                    )
+                except:
+                    pass
+
+
+    except Exception as e:
+        print(f"Download error for {video_link}: {e}")
+        if progress_msg:
+            try:
+                await progress_msg.edit_text(f"❌ خطأ أثناء التحميل: {e}")
+            except:
+                pass
+    finally:
+        # Always clean up downloaded files regardless of success or failure
+        if video_file and os.path.exists(video_file):
+            try:
+                os.remove(video_file)
+                print(f"Cleaned up video file: {video_file}")
             except Exception as e:
-                print(f"Error in download: {e}")
-                bot.send_message(message.chat.id, f"❌ خطأ في التحميل: {str(e)}")
-        
-        download_thread = threading.Thread(target=start_download)
-        download_thread.start()
-        return
-    
-    # Regular search functionality
-    query = text
-    query_key = get_key(query)
-    results = search_api(query)
-    if not results or not results.get('results'):
-        markup = InlineKeyboardMarkup()
-        markup.add(get_dev_button())
-        bot.send_message(message.chat.id, "❌ لم يتم العثور على نتائج.", reply_markup=markup)
-        return
-
-    markup = InlineKeyboardMarkup(row_width=1)
-    for result in results['results']:
-        title = result['title']
-        link = result['link']
-        link_key = get_key(link)
-        btn_text = f"{title} ({result['year']}, {result['quality']}, التقييم: {result['rating']})"
-        callback_data = f"select:{link_key}:1:{query_key}"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
-
-    # Pagination if more pages
-    if len(results['results']) == 10:  # Assuming 10 per page
-        markup.add(InlineKeyboardButton("➡️ الصفحة التالية", callback_data=f"next:2:{query_key}"))
-
-    markup.add(get_dev_button())
-    bot.send_message(message.chat.id, f"🔍 نتائج البحث عن '{query}':", reply_markup=markup)
-
-# Handle callbacks
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    data = call.data.split(':')
-    action = data[0]
-
-    if action == 'select':
-        link_key = data[1]
-        page = data[2]
-        query_key = data[3]
-        link = data_map.get(link_key)
-        query = data_map.get(query_key)
-        if not link:
-            bot.answer_callback_query(call.id, "خطأ: الرابط غير موجود.")
-            return
-        details = get_item_details(link)
-        if not details:
-            bot.answer_callback_query(call.id, "خطأ في جلب التفاصيل.")
-            return
-
-        # Send photo with story as caption if possible
-        caption = f"🎬 {details.get('title', '')}\n\n{details.get('story', '')}"
-        photo_sent = False
-        if 'image' in details:
+                print(f"Error removing video file: {e}")
+                
+        if audio_file and os.path.exists(audio_file):
             try:
-                bot.send_photo(call.message.chat.id, details['image'], caption=caption[:1024])  # Truncate if too long
-                photo_sent = True
-            except:
-                # If photo fails, continue without it
-                pass
-
-        # Prepare info buttons
-        info_items = []
-        if 'badge' in details:
-            info_items.append(f"🏷️ {details['badge']}")
-        if 'rating' in details:
-            info_items.append(f"⭐ التقييم: {details['rating']}")
-        if 'language' in details:
-            info_items.append(details['language'])
-        if 'quality' in details:
-            info_items.append(details['quality'])
-        if 'production' in details:
-            info_items.append(details['production'])
-        if 'year' in details:
-            info_items.append(details['year'])
-        if 'duration' in details:
-            info_items.append(details['duration'])
-        if 'genre' in details:
-            genres_text = ', '.join(details['genre'])
-            info_items.append(f"🎭 النوع: {genres_text}")
-
-        markup = InlineKeyboardMarkup(row_width=2)
-
-        # Add info buttons
-        for i in range(0, len(info_items), 2):
-            row = []
-            for j in range(i, min(i+2, len(info_items))):
-                row.append(InlineKeyboardButton(info_items[j], callback_data="noop"))
-            markup.row(*row)
-
-        if 'episodes' in details:  # It's a series season
-            for ep in details['episodes']:
-                ep_title = ep['title']
-                ep_link = ep['link']
-                ep_key = get_key(ep_link)
-                callback_data = f"epselect:{ep_key}"
-                markup.add(InlineKeyboardButton(ep_title, callback_data=callback_data))
-            
-            if photo_sent:
-                # If photo was sent, send episodes list with proper text
-                bot.send_message(call.message.chat.id, "📋 الحلقات المتاحة:", reply_markup=markup)
-            else:
-                # If no photo, send title with episodes
-                bot.send_message(call.message.chat.id, f"📋 {details.get('title', 'الحلقات')}:", reply_markup=markup)
-        else:  # It's a movie
-            if 'links' in details:
-                for quality, links_list in details['links'].items():
-                    for link_item in links_list:
-                        size = link_item.get('size', '')
-                        # Add direct video if available
-                        if 'video_direct' in link_item:
-                            direct_url = link_item['video_direct']
-                            markup.add(InlineKeyboardButton(f"⬇️ تحميل مباشر {quality} ({size})", url=direct_url))
-                        # Add embed if available
-                        if 'embed_link' in link_item:
-                            embed_url = link_item['embed_link']
-                            markup.add(InlineKeyboardButton(f"▶️ مشاهدة اونلاين {quality} ({size})", url=embed_url))
-            
-            bot.send_message(call.message.chat.id, "🎬 روابط الفيلم:", reply_markup=markup)
-
-        # Add back to search results if needed
-        back_markup = InlineKeyboardMarkup()
-        back_markup.add(InlineKeyboardButton("🔙 العودة إلى البحث", callback_data=f"search:{page}:{query_key}"))
-        back_markup.add(get_dev_button())
-        bot.send_message(call.message.chat.id, "إجراءات:", reply_markup=back_markup)
-
-    elif action == 'epselect':
-        ep_key = data[1]
-        ep_link = data_map.get(ep_key)
-        if not ep_link:
-            bot.answer_callback_query(call.id, "خطأ: رابط الحلقة غير موجود.")
-            return
-        ep_details = get_episode_links(ep_link)
-        if not ep_details:
-            bot.answer_callback_query(call.id, "خطأ في جلب الحلقة.")
-            return
-
-        # Send photo for episode
-        caption = ep_details.get('title', '')
-        photo_sent = False
-        if 'image' in ep_details:
+                os.remove(audio_file)
+                print(f"Cleaned up audio file: {audio_file}")
+            except Exception as e:
+                print(f"Error removing audio file: {e}")
+                
+        if thumb and os.path.exists(thumb):
             try:
-                bot.send_photo(call.message.chat.id, ep_details['image'], caption=caption)
-                photo_sent = True
-            except:
-                # If photo fails, continue without it
-                pass
-
-        # Prepare info buttons for episode
-        info_items = []
-        if 'rating' in ep_details:
-            info_items.append(f"⭐ التقييم: {ep_details['rating']}")
-        if 'language' in ep_details:
-            info_items.append(ep_details['language'])
-        if 'quality' in ep_details:
-            info_items.append(ep_details['quality'])
-        if 'production' in ep_details:
-            info_items.append(ep_details['production'])
-        if 'year' in ep_details:
-            info_items.append(ep_details['year'])
-        if 'duration' in ep_details:
-            info_items.append(ep_details['duration'])
-        if 'categories' in ep_details:
-            info_items.append(f"🎭 النوع: {', '.join(ep_details['categories'])}")
-
-        markup = InlineKeyboardMarkup(row_width=2)
-
-        # Add info buttons
-        for i in range(0, len(info_items), 2):
-            row = []
-            for j in range(i, min(i+2, len(info_items))):
-                row.append(InlineKeyboardButton(info_items[j], callback_data="noop"))
-            markup.row(*row)
-
-        if 'links' in ep_details:
-            for quality, links_list in ep_details['links'].items():
-                for link_item in links_list:
-                    size = link_item.get('size', '')
-                    # For episodes, check videos
-                    if 'videos' in link_item:
-                        for vid in link_item['videos']:
-                            v_size = vid['size']
-                            v_url = vid['url']
-                            v_embed = vid['embed']
-                            markup.add(InlineKeyboardButton(f"⬇️ تحميل مباشر {v_size}p ({size})", url=v_url))
-                            markup.add(InlineKeyboardButton(f"▶️ مشاهدة اونلاين {v_size}p ({size})", url=v_embed))
-
-        markup.add(get_dev_button())
+                os.remove(thumb)
+                print(f"Cleaned up thumbnail: {thumb}")
+            except Exception as e:
+                print(f"Error removing thumbnail: {e}")
         
-        episode_title = ep_details.get('title', 'الحلقة')
-        bot.send_message(call.message.chat.id, f"📺 {episode_title}", reply_markup=markup)
+        # Clean up progress message after completion or error
+        await asyncio.sleep(3)
+        try:
+            await progress_msg.delete()
+        except:
+            pass
 
-    elif action in ('next', 'prev'):
-        page = int(data[1])
-        query_key = data[2]
-        query = data_map.get(query_key)
-        if not query:
-            bot.answer_callback_query(call.id, "خطأ: الاستعلام غير موجود.")
-            return
-        results = search_api(query, page)
-        if not results or not results.get('results'):
-            bot.answer_callback_query(call.id, "لا توجد نتائج إضافية.")
-            return
-
-        markup = InlineKeyboardMarkup(row_width=1)
-        for result in results['results']:
-            title = result['title']
-            link = result['link']
-            link_key = get_key(link)
-            btn_text = f"{title} ({result['year']}, {result['quality']}, التقييم: {result['rating']})"
-            callback_data = f"select:{link_key}:{page}:{query_key}"
-            markup.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
-
-        # Pagination buttons
-        row = []
-        if page > 1:
-            row.append(InlineKeyboardButton("⬅️ الصفحة السابقة", callback_data=f"prev:{page-1}:{query_key}"))
-        if len(results['results']) == 10:
-            row.append(InlineKeyboardButton("➡️ الصفحة التالية", callback_data=f"next:{page+1}:{query_key}"))
-        if row:
-            markup.row(*row)
-
-        markup.add(get_dev_button())
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-    elif action == 'search':
-        page = int(data[1])
-        query_key = data[2]
-        query = data_map.get(query_key)
-        if not query:
-            bot.answer_callback_query(call.id, "خطأ: الاستعلام غير موجود.")
-            return
-        results = search_api(query, page)
-        if not results or not results.get('results'):
-            bot.answer_callback_query(call.id, "لا توجد نتائج إضافية.")
-            return
-
-        markup = InlineKeyboardMarkup(row_width=1)
-        for result in results['results']:
-            title = result['title']
-            link = result['link']
-            link_key = get_key(link)
-            btn_text = f"{title} ({result['year']}, {result['quality']}, التقييم: {result['rating']})"
-            callback_data = f"select:{link_key}:{page}:{query_key}"
-            markup.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
-
-        # Pagination buttons
-        row = []
-        if page > 1:
-            row.append(InlineKeyboardButton("⬅️ الصفحة السابقة", callback_data=f"prev:{page-1}:{query_key}"))
-        if len(results['results']) == 10:
-            row.append(InlineKeyboardButton("➡️ الصفحة التالية", callback_data=f"next:{page+1}:{query_key}"))
-        if row:
-            markup.row(*row)
-
-        markup.add(get_dev_button())
-        bot.edit_message_text(f"🔍 نتائج البحث عن '{query}':", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-    elif action == 'noop':
-        pass  # Do nothing
-
-    bot.answer_callback_query(call.id)
-
-# Function to run both bots
-async def start_pyrogram():
-    await pyrogram_client.start()
-
-def run_both_bots():
-    print("🤖 بدء تشغيل البوت...")
-    
-    # Start Pyrogram client in a separate thread
-    def start_pyrogram_client():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_pyrogram())
-        loop.run_forever()
-    
-    pyrogram_thread = threading.Thread(target=start_pyrogram_client)
-    pyrogram_thread.daemon = True
-    pyrogram_thread.start()
-    
-    print("✅ تم تشغيل عميل Pyrogram")
-    print("✅ بدء تشغيل TeleBot...")
-    
-    # Start telebot polling
-    bot.infinity_polling()
-
-# Run the bot
-if __name__ == "__main__":
-    run_both_bots()
+print("Bot is starting...")
+try:
+    bot.run()
+except Exception as e:
+    print(f"An error occurred during bot execution: {e}")
