@@ -7,7 +7,7 @@ bot = Client(
     "youtube",
     api_id = 20569963,
     api_hash = "37f536fd550fa5dd70cdaaca39c2b1d7",
-    bot_token = "6191519380:AAGk0Pg8CivZxe5uZeGWBtjnseeYHV2lnEc"
+    bot_token = "8265705564:AAF67NcivYXYR5Ofh82PfjyUzMK8wZVLnos"
 )
 
 def search_yt(query):
